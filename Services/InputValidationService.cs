@@ -6,16 +6,20 @@
 
     public class InputValidationService : IInputValidationService
     {
-        private readonly HashSet<string> _sqlKeywords = new HashSet<string>
-    {
-        "SELECT", "INSERT", "UPDATE", "DELETE", "DROP", "UNION",
-        "ALTER", "CREATE", "WHERE", "FROM", "EXEC", "EXECUTE",
-        "--", ";", "/*", "*/", "@@", "@", "CHAR", "NCHAR",
-        "VARCHAR", "NVARCHAR", "CAST", "CONVERT"
-    };
+        private readonly HashSet<string> _sqlKeywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "SELECT", "INSERT", "UPDATE", "DELETE", "DROP", "UNION",
+            "ALTER", "CREATE", "WHERE", "FROM", "EXEC", "EXECUTE",
+            "--", ";", "/*", "*/", "@@", "@", "CHAR", "NCHAR",
+            "VARCHAR", "NVARCHAR", "CAST", "CONVERT",
+            // FIX: these were missing — used in ' OR '1'='1 and similar injections
+            "OR", "AND", "HAVING", "ORDER BY", "GROUP BY", "LIKE",
+            "SLEEP", "WAITFOR", "BENCHMARK", "XP_CMDSHELL"
+        };
 
         private readonly Regex _sqlInjectionPattern = new Regex(
-            @"('(''|[^'])*')|(;)|(\b(ALTER|CREATE|DELETE|DROP|EXEC(UTE)?|INSERT( +INTO)?|MERGE|SELECT|UPDATE|UNION( +ALL)?)\b)",
+            // FIX: added OR/AND/HAVING/single-quote patterns
+            @"('(''|[^'])*')|(;)|(\b(ALTER|CREATE|DELETE|DROP|EXEC(UTE)?|INSERT( +INTO)?|MERGE|SELECT|UPDATE|UNION( +ALL)?|OR|AND|HAVING|SLEEP|WAITFOR)\b)|(--)|(\/\*)",
             RegexOptions.Compiled | RegexOptions.IgnoreCase
         );
 
@@ -39,13 +43,8 @@
             if (string.IsNullOrWhiteSpace(input))
                 return string.Empty;
 
-            // HTML encode the input to prevent XSS
             string sanitized = HttpUtility.HtmlEncode(input);
-
-            // Remove any remaining potentially dangerous characters
             sanitized = _xssPattern.Replace(sanitized, "");
-
-            // Additional SQL injection prevention
             sanitized = _sqlInjectionPattern.Replace(sanitized, "");
 
             return sanitized.Trim();
@@ -72,18 +71,25 @@
             if (string.IsNullOrWhiteSpace(input))
                 return false;
 
-            string upperInput = input.ToUpperInvariant();
+            // FIX: check for single quote first — it's the entry point for most SQL injection
+            if (input.Contains('\''))
+                return true;
 
-            // Check for SQL injection keywords
+            // Check SQL injection keywords
+            if (_sqlInjectionPattern.IsMatch(input))
+                return true;
+
+            // Check for XSS patterns
+            if (_xssPattern.IsMatch(input))
+                return true;
+
+            // Fallback: keyword loop for anything the regex misses
+            string upperInput = input.ToUpperInvariant();
             foreach (var keyword in _sqlKeywords)
             {
                 if (upperInput.Contains(keyword.ToUpperInvariant()))
                     return true;
             }
-
-            // Check for XSS patterns
-            if (_xssPattern.IsMatch(input))
-                return true;
 
             return false;
         }
